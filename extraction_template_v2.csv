@@ -1,0 +1,3 @@
+﻿Parent Folder,mzmin,mzmax,Extraction Method,Sort Columns,Convert to CCS,Charge,mz,Use Recalibrated State,Pressure Compensation Strategy
+C:\Users\armbrusm\Documents\tdfExtracter\miniset,4445,4455,method,TRUE,FALSE,16,4450,FALSE,AnalyisGlobalPressureCompensation
+C:\Users\armbrusm\Documents\tdfExtracter\mAb_miniSet,5690,5750,filename,TRUE,TRUE,26,5700,TRUE,NoPressureCompensation
