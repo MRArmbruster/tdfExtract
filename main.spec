@@ -5,7 +5,7 @@ a = Analysis(
     ['main.py'],
     pathex=[],
     binaries=[],
-    datas=[('timsdata.dll', '.'), ('fingerprint.png', '.')],
+    datas=[('timsdata.dll', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
