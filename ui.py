@@ -1,344 +1,245 @@
-import tkinter as tk
-from tkinter import messagebox, filedialog
-from ttkbootstrap import Style, ttk
-import threading
+# ui.py  ─  full GUI for tdfExtract
+# Frames for bin‑count and CCS parameters remain invisible until requested.
+
+from __future__ import annotations
+import os, sys, threading, tkinter as tk
+from tkinter import filedialog, messagebox, PhotoImage
 import pandas as pd
+from ttkbootstrap import Style, ttk
 from processing import process_data, process_batch_data
-from tkinter import PhotoImage
-import sys
-import os
 
-# Global frame references for dynamic UI elements
-binning_frame_ref = None
-ccs_frame_ref = None
-summed_frame_ref = None  # For summed intensity mode inputs
-
-if getattr(sys, 'frozen', False):
-    bundle_dir = sys._MEIPASS
-    dll_path = os.path.join(bundle_dir, 'timsdata.dll')
-    os.add_dll_directory(os.path.dirname(dll_path))
+# ── DLL search path setup ───────────────────────────────────────────────────
+if getattr(sys, "frozen", False):
+    _bundle = sys._MEIPASS                                   # type: ignore[attr-defined]
+    os.add_dll_directory(os.path.dirname(os.path.join(_bundle, "timsdata.dll")))
 else:
+    _bundle = os.path.dirname(os.path.abspath(__file__))
     os.add_dll_directory(os.getcwd())
-    bundle_dir = os.path.dirname(os.path.abspath(__file__))
 
-icon_path = os.path.join(bundle_dir, 'fingerprint.png')
+ICON_PATH = os.path.join(_bundle, "fingerprint.png")
 
-# Global variable to hold the chosen output directory.
-output_dir_var = ""
 
-def create_ui():
-    global binning_frame_ref, ccs_frame_ref, summed_frame_ref
-    global mzmin_var, mzmax_var, recalibrated_var, pressure_compensation_var
-    global sort_columns_var, progress_var, status_var, process_button, batch_button, root
-    global bin_mobility_var, num_bins_var
-    global ccs_conversion_var, charge_var, mz_value_var
-    global sum_intensity_mode_var, mobmin_var, mobmax_var, output_dir_var
-
+def create_ui() -> None:
+    # ── root & theme ───────────────────────────────────────────────────────
     root = tk.Tk()
-
-    recalibrated_var = tk.BooleanVar(value=True)
-    pressure_compensation_var = tk.StringVar(value="Global")
-
-    bin_mobility_var = tk.BooleanVar(value=False)
-    num_bins_var = tk.StringVar(value="200")
-
-    ccs_conversion_var = tk.BooleanVar(value=False)
-    charge_var = tk.StringVar(value="")
-    mz_value_var = tk.StringVar(value="")
-
-    sum_intensity_mode_var = tk.BooleanVar(value=False)
-    mobmin_var = tk.StringVar(value="")
-    mobmax_var = tk.StringVar(value="")
-
-    def create_binning_frame(parent):
-        frm = ttk.Frame(parent)
-        ttk.Label(frm, text="Number of bins:", font=("Helvetica", 12)).grid(row=0, column=0, sticky=tk.W)
-        nb_entry = ttk.Entry(frm, textvariable=num_bins_var, font=("Helvetica", 12), width=5)
-        nb_entry.grid(row=0, column=1, sticky=tk.W)
-        return frm
-
-    def create_ccs_frame(parent):
-        frm = ttk.Frame(parent)
-        ttk.Label(frm, text="Charge:", font=("Helvetica", 12)).grid(row=0, column=0, sticky=tk.W)
-        ch_entry = ttk.Entry(frm, textvariable=charge_var, font=("Helvetica", 12), width=5)
-        ch_entry.grid(row=0, column=1, sticky=tk.W, padx=(5, 20))
-        ttk.Label(frm, text="m/z:", font=("Helvetica", 12)).grid(row=0, column=2, sticky=tk.W)
-        mz_entry = ttk.Entry(frm, textvariable=mz_value_var, font=("Helvetica", 12), width=7)
-        mz_entry.grid(row=0, column=3, sticky=tk.W)
-        return frm
-
-    def create_summed_frame(parent):
-        frm = ttk.Frame(parent)
-        ttk.Label(frm, text="Min Mobility:", font=("Helvetica", 12)).grid(row=0, column=0, sticky=tk.W)
-        mobmin_entry = ttk.Entry(frm, textvariable=mobmin_var, font=("Helvetica", 12), width=7)
-        mobmin_entry.grid(row=0, column=1, sticky=tk.W, padx=(5, 20))
-        ttk.Label(frm, text="Max Mobility:", font=("Helvetica", 12)).grid(row=0, column=2, sticky=tk.W)
-        mobmax_entry = ttk.Entry(frm, textvariable=mobmax_var, font=("Helvetica", 12), width=7)
-        mobmax_entry.grid(row=0, column=3, sticky=tk.W)
-        return frm
-
-    # New: Create a button to select an output directory.
-    def select_output_directory():
-        global output_dir_var
-        selected = filedialog.askdirectory(title="Select Output Directory")
-        if selected:
-            output_dir_var = selected
-            # Optionally update the button text to show the chosen directory.
-            output_btn.config(text=f"Output: {os.path.basename(selected)}")
-    output_btn = ttk.Button(root, text="Select Output Directory", command=select_output_directory)
-
-    def toggle_binning():
-        global binning_frame_ref
-        if bin_mobility_var.get():
-            if binning_frame_ref is None:
-                binning_frame_ref = create_binning_frame(frame)
-                binning_frame_ref.grid(row=7, column=0, columnspan=2, sticky=tk.W, padx=10)
-        else:
-            if binning_frame_ref is not None:
-                binning_frame_ref.destroy()
-                binning_frame_ref = None
-
-    def toggle_ccs():
-        global ccs_frame_ref
-        if ccs_conversion_var.get():
-            if ccs_frame_ref is None:
-                ccs_frame_ref = create_ccs_frame(frame)
-                ccs_frame_ref.grid(row=9, column=0, columnspan=2, sticky=tk.W, padx=10)
-        else:
-            if ccs_frame_ref is not None:
-                ccs_frame_ref.destroy()
-                ccs_frame_ref = None
-
-    def toggle_sum_mode():
-        global summed_frame_ref
-        if sum_intensity_mode_var.get():
-            if summed_frame_ref is None:
-                summed_frame_ref = create_summed_frame(frame)
-                summed_frame_ref.grid(row=15, column=0, columnspan=2, sticky=tk.W, padx=10)
-        else:
-            if summed_frame_ref is not None:
-                summed_frame_ref.destroy()
-                summed_frame_ref = None
-
-    def on_process():
-        input_folder = filedialog.askdirectory(title="Select .d file")
-        if not input_folder:
-            messagebox.showerror("Error", "No folder selected.")
-            return
-
-        try:
-            mzmin = float(mzmin_var.get())
-            mzmax = float(mzmax_var.get())
-        except ValueError:
-            messagebox.showerror("Error", "Invalid input value for m/z.")
-            return
-
-        extraction_method = "method"
-        sort_columns = sort_columns_var.get()
-        use_recalibrated_state = recalibrated_var.get()
-        pressure_compensation_strategy = pressure_compensation_var.get()
-
-        do_binning = bin_mobility_var.get()
-        try:
-            nbins = int(num_bins_var.get())
-        except ValueError:
-            messagebox.showerror("Error", "Invalid number of bins.")
-            return
-
-        do_ccs = ccs_conversion_var.get()
-        if do_ccs:
-            if not charge_var.get() or not mz_value_var.get():
-                messagebox.showerror("Error", "Please enter both Charge and m/z for CCS conversion.")
-                return
-
-        sum_mode = sum_intensity_mode_var.get()
-        if sum_mode:
-            try:
-                mobmin = float(mobmin_var.get())
-                mobmax = float(mobmax_var.get())
-            except ValueError:
-                messagebox.showerror("Error", "Invalid input value for mobility.")
-                return
-        else:
-            mobmin = None
-            mobmax = None
-
-        # Use output_dir from global variable.
-        out_dir = output_dir_var if output_dir_var and os.path.isdir(output_dir_var) else ""
-
-        progress_var.set(0)
-        status_var.set("Starting processing...")
-        root.update_idletasks()
-
-        process_button.config(text="Processing...", state="disabled")
-
-        thread = threading.Thread(target=process_data, args=(
-            input_folder,
-            mzmin,
-            mzmax,
-            progress_var,
-            status_var,
-            process_button,
-            root,
-            extraction_method,
-            sort_columns,
-            use_recalibrated_state,
-            pressure_compensation_strategy,
-            do_binning,
-            nbins,
-            do_ccs,
-            charge_var.get(),
-            mz_value_var.get(),
-            sum_mode,
-            mobmin,
-            mobmax,
-            False,  # batch_mode is False for single-run mode
-            out_dir
-        ))
-        thread.start()
-        root.update_idletasks()
-
-    def on_batch_process():
-        file_path = filedialog.askopenfilename(title="Select a CSV file", filetypes=[("CSV files", "*.csv")])
-        if not file_path:
-            messagebox.showerror("Error", "No file selected.")
-            return
-
-        try:
-            batch_data = pd.read_csv(file_path)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to read file: {e}")
-            return
-
-        # Use output_dir from global variable.
-        out_dir = output_dir_var if output_dir_var and os.path.isdir(output_dir_var) else ""
-        
-        progress_var.set(0)
-        status_var.set("Starting batch processing...")
-        root.update_idletasks()
-
-        batch_button.config(text="Batch Processing...", state="disabled")
-
-        thread = threading.Thread(target=process_batch_data, args=(batch_data, progress_var, status_var, batch_button, root, out_dir))
-        thread.start()
-        root.update_idletasks()
-
-    def open_advanced_settings():
-        def save_advanced_settings():
-            recalibrated_var.set(recalibrated_check_var.get())
-            pressure_compensation_var.set(pressure_compensation_var_popup.get())
-            advanced_window.destroy()
-
-        advanced_window = tk.Toplevel(root)
-        advanced_window.title("Advanced Settings")
-        advanced_window.geometry("400x150")
-
-        recalibrated_check_var = tk.BooleanVar(value=recalibrated_var.get())
-        ttk.Checkbutton(advanced_window, text="Use Recalibrated State", variable=recalibrated_check_var).grid(
-            row=0, column=0, sticky=tk.W, padx=10, pady=10)
-
-        ttk.Label(advanced_window, text="Pressure Compensation Strategy:").grid(
-            row=1, column=0, sticky=tk.W, padx=10, pady=10)
-        pressure_compensation_var_popup = tk.StringVar(value=pressure_compensation_var.get())
-        pressure_compensation_menu = ttk.Combobox(
-            advanced_window,
-            textvariable=pressure_compensation_var_popup,
-            values=["No compensation", "Per-frame", "Global"],
-            state="readonly"
-        )
-        pressure_compensation_menu.grid(row=1, column=1, sticky=tk.W, padx=10, pady=10)
-
-        save_button = ttk.Button(advanced_window, text="Save", command=save_advanced_settings)
-        save_button.grid(row=2, column=0, columnspan=2, pady=10)
-
-    style = Style(theme='flatly')
+    Style(theme="flatly")
     root.title("tdfExtract")
-    root.geometry('475x750')
-    root.minsize(475, 750)
-    root.iconphoto(False, PhotoImage(file=icon_path))
+    root.geometry("480x770")
+    root.minsize(480, 740)
+    root.iconphoto(False, PhotoImage(file=ICON_PATH))
 
-    frame = ttk.Frame(root, padding="10")
-    frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+    # ── Tk variables ───────────────────────────────────────────────────────
+    mzmin_var, mzmax_var    = tk.StringVar(), tk.StringVar()
+    label_src_var           = tk.StringVar(value="transfer")  # transfer|delta6|filename
+    polarity_var            = tk.StringVar(value="positive")  # positive|negative|both
+    sort_var                = tk.BooleanVar(value=True)
+
+    bin_chk_var             = tk.BooleanVar(value=False)
+    nbins_var               = tk.StringVar(value="200")
+
+    ccs_chk_var             = tk.BooleanVar(value=False)
+    charge_var, mzval_var   = tk.StringVar(), tk.StringVar()
+
+    recalib_var             = tk.BooleanVar(value=True)
+    pcs_var                 = tk.StringVar(value="Global")
+
+    progress_var            = tk.DoubleVar(value=0)
+    status_var              = tk.StringVar(value="Status: Ready")
+
+    # ── layout frame ───────────────────────────────────────────────────────
+    frame = ttk.Frame(root, padding=10)
+    frame.grid(row=0, column=0, sticky="nsew")
     frame.grid_columnconfigure(0, weight=1)
     frame.grid_columnconfigure(1, weight=0)
 
-    ttk.Label(frame, text="tdfExtract", font=("Helvetica", 16)).grid(row=0, column=0, columnspan=2, pady=(0, 20))
+    ttk.Label(frame, text="tdfExtract", font=("Helvetica", 16))\
+        .grid(row=0, column=0, columnspan=2, pady=(0, 18))
 
-    batch_button = ttk.Button(frame, text="Batch Extraction", command=on_batch_process, bootstyle="primary", padding=(12, 6))
-    batch_button.grid(row=0, column=1, sticky=tk.E, padx=10)
+    # placeholders for dynamic frames
+    bin_frame: tk.Frame | None = None
+    ccs_frame: tk.Frame | None = None
 
-    ttk.Label(frame, text="Enter the m/z range for the ion of interest.", font=("Helvetica", 14)).grid(
-        row=1, column=0, columnspan=2, pady=(0, 30)
-    )
+    # ── helper creators ────────────────────────────────────────────────────
+    def create_bin_frame() -> tk.Frame:
+        nonlocal bin_frame
+        if bin_frame is None:
+            bin_frame = ttk.Frame(frame)
+            ttk.Label(bin_frame, text="Number of bins:", font=("Helvetica", 12))\
+                .grid(row=0, column=0, sticky="w")
+            ttk.Entry(bin_frame, textvariable=nbins_var, font=("Helvetica", 12), width=6)\
+                .grid(row=0, column=1, sticky="w")
+        return bin_frame
 
-    ttk.Label(frame, text="Minimum m/z:", font=("Helvetica", 12)).grid(row=2, column=0, sticky=tk.E)
-    mzmin_var = tk.StringVar(value="")
-    mzmin_entry = ttk.Entry(frame, textvariable=mzmin_var, font=("Helvetica", 12))
-    mzmin_entry.grid(row=2, column=1, sticky=(tk.W, tk.E))
+    def create_ccs_frame() -> tk.Frame:
+        nonlocal ccs_frame
+        if ccs_frame is None:
+            ccs_frame = ttk.Frame(frame)
+            ttk.Label(ccs_frame, text="Charge:", font=("Helvetica", 12))\
+                .grid(row=0, column=0, sticky="w")
+            ttk.Entry(ccs_frame, textvariable=charge_var, font=("Helvetica", 12), width=5)\
+                .grid(row=0, column=1, sticky="w", padx=(5, 15))
+            ttk.Label(ccs_frame, text="m/z:", font=("Helvetica", 12))\
+                .grid(row=0, column=2, sticky="w")
+            ttk.Entry(ccs_frame, textvariable=mzval_var, font=("Helvetica", 12), width=8)\
+                .grid(row=0, column=3, sticky="w")
+        return ccs_frame
 
-    ttk.Label(frame, text="Maximum m/z:", font=("Helvetica", 12)).grid(row=3, column=0, sticky=tk.E)
-    mzmax_var = tk.StringVar(value="")
-    mzmax_entry = ttk.Entry(frame, textvariable=mzmax_var, font=("Helvetica", 12))
-    mzmax_entry.grid(row=3, column=1, sticky=(tk.W, tk.E))
+    # ── batch button placeholder; callback wired later ─────────────────────
+    batch_btn = ttk.Button(frame, text="Batch Extraction",
+                           bootstyle="primary", padding=(12, 6))
+    batch_btn.grid(row=0, column=1, sticky="e", padx=10)
 
-    extraction_frame = ttk.LabelFrame(frame, text="Extraction method", padding=(10, 5))
-    extraction_frame.grid(row=4, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(10, 20))
-    extraction_method_var = tk.StringVar(value="method")
-    method_radio = ttk.Radiobutton(
-        extraction_frame, text="Automatically extract D6 voltage",
-        variable=extraction_method_var, value="method"
-    )
-    method_radio.grid(row=0, column=0, sticky=tk.W)
+    # ── m/z inputs ─────────────────────────────────────────────────────────
+    ttk.Label(frame, text="Enter the m/z range for the ion of interest.",
+              font=("Helvetica", 14))\
+        .grid(row=1, column=0, columnspan=2, pady=(0, 24))
 
-    sort_columns_var = tk.BooleanVar(value=True)
-    sort_checkbox = ttk.Checkbutton(frame, text="Sort columns by voltage before saving", variable=sort_columns_var)
-    sort_checkbox.grid(row=5, column=0, columnspan=2, sticky=tk.W)
+    ttk.Label(frame, text="Minimum m/z:", font=("Helvetica", 12))\
+        .grid(row=2, column=0, sticky="e")
+    ttk.Entry(frame, textvariable=mzmin_var, font=("Helvetica", 12))\
+        .grid(row=2, column=1, sticky="we")
 
-    binning_check = ttk.Checkbutton(frame, text="Re-bin mobility axis", variable=bin_mobility_var, command=toggle_binning)
-    binning_check.grid(row=6, column=0, columnspan=2, sticky=tk.W)
+    ttk.Label(frame, text="Maximum m/z:", font=("Helvetica", 12))\
+        .grid(row=3, column=0, sticky="e")
+    ttk.Entry(frame, textvariable=mzmax_var, font=("Helvetica", 12))\
+        .grid(row=3, column=1, sticky="we")
 
-    ccs_checkbox = ttk.Checkbutton(frame, text="Convert mobility to CCS", variable=ccs_conversion_var, command=toggle_ccs)
-    ccs_checkbox.grid(row=8, column=0, columnspan=2, sticky=tk.W)
+    # ── voltage labelling choice ───────────────────────────────────────────
+    lab_box = ttk.LabelFrame(frame, text="Voltage labelling", padding=(10, 5))
+    lab_box.grid(row=4, column=0, columnspan=2, sticky="we", pady=(0, 10))
+    ttk.Radiobutton(lab_box, text="Transfer Δ6 (.method)",
+                    variable=label_src_var, value="transfer").grid(row=0, column=0, sticky="w")
+    ttk.Radiobutton(lab_box, text="In‑TIMS Δ6 (.method)",
+                    variable=label_src_var, value="delta6").grid(row=1, column=0, sticky="w")
+    ttk.Radiobutton(lab_box, text="Parse from folder name (_120V_)",
+                    variable=label_src_var, value="filename").grid(row=2, column=0, sticky="w")
 
-    summed_checkbox = ttk.Checkbutton(frame, text="Mobility filtering/summing", variable=sum_intensity_mode_var, command=toggle_sum_mode)
-    summed_checkbox.grid(row=14, column=0, columnspan=2, sticky=tk.W, pady=(10, 0))
+    # polarity filter
+    pol_box = ttk.LabelFrame(frame, text="Polarity filter (method modes)", padding=(10, 5))
+    pol_box.grid(row=5, column=0, columnspan=2, sticky="we", pady=(0, 10))
+    for i, txt in enumerate(("Positive", "Negative", "Both")):
+        ttk.Radiobutton(pol_box, text=txt, value=txt.lower(),
+                        variable=polarity_var).grid(row=0, column=i, sticky="w")
 
-    # Place the output directory button (without text entry) at row 12.
-    output_dir_btn = ttk.Button(frame, text="Select Output Directory", command=select_output_directory)
-    output_dir_btn.grid(row=12, column=0, columnspan=2, sticky=tk.W, padx=10, pady=(10, 0))
+    def _toggle_pol(*_):
+        state = "disabled" if label_src_var.get() == "filename" else "!disabled"
+        for w in pol_box.winfo_children(): w.state([state])
+    label_src_var.trace_add("write", _toggle_pol); _toggle_pol()
 
-    advanced_button = ttk.Button(frame, text="Advanced Settings", command=open_advanced_settings, bootstyle="primary", padding=(10, 5))
-    advanced_button.grid(row=16, column=0, columnspan=2, pady=20)
+    ttk.Checkbutton(frame, text="Sort voltage columns numerically",
+                    variable=sort_var).grid(row=6, column=0, columnspan=2, sticky="w")
 
-    ttk.Label(frame, text="Extraction output is saved in the selected folder as \"*_raw.csv\"", font=("Helvetica", 10)).grid(row=17, column=0, columnspan=2, pady=(5, 10))
+    # ── binning checkbox ───────────────────────────────────────────────────
+    ttk.Checkbutton(frame, text="Re‑bin mobility axis", variable=bin_chk_var)\
+        .grid(row=7, column=0, columnspan=2, sticky="w")
 
-    # Place the process button in its own frame with fixed height.
-    button_frame = ttk.Frame(frame, height=60)
-    button_frame.grid(row=18, column=0, columnspan=2, pady=20, sticky="ew")
-    button_frame.grid_propagate(False)
-    process_button = ttk.Button(button_frame, text="Select .d file", command=on_process, bootstyle="primary", padding=(10, 5))
-    process_button.pack(expand=True)
+    def _bin_toggle(*_):
+        bf = create_bin_frame()
+        if bin_chk_var.get():
+            bf.grid(row=8, column=0, columnspan=2, sticky="w", padx=10)
+        else:
+            bf.grid_forget()
+    bin_chk_var.trace_add("write", _bin_toggle)
 
-    progress_var = tk.DoubleVar(value=0)
-    progress_frame = ttk.Frame(frame, bootstyle="dark")
-    progress_frame.grid(row=19, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=20)
-    progress_bar = ttk.Progressbar(progress_frame, variable=progress_var, maximum=100, length=300, bootstyle="info")
-    progress_bar.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+    # ── CCS checkbox ───────────────────────────────────────────────────────
+    ttk.Checkbutton(frame, text="Convert mobility to CCS", variable=ccs_chk_var)\
+        .grid(row=9, column=0, columnspan=2, sticky="w")
 
-    status_var = tk.StringVar(value="Status: Ready")
-    status_label = ttk.Label(frame, textvariable=status_var, font=("Helvetica", 12))
-    status_label.grid(row=20, column=0, columnspan=2, sticky=(tk.W, tk.E))
+    def _ccs_toggle(*_):
+        cf = create_ccs_frame()
+        if ccs_chk_var.get():
+            cf.grid(row=10, column=0, columnspan=2, sticky="w", padx=10)
+        else:
+            cf.grid_forget()
+    ccs_chk_var.trace_add("write", _ccs_toggle)
 
-    for child in frame.winfo_children():
-        child.grid_configure(padx=10, pady=10)
+    # ── advanced settings dialog ───────────────────────────────────────────
+    def _advanced():
+        dlg = tk.Toplevel(root); dlg.title("Advanced Settings")
+        dlg.resizable(False, False); dlg.geometry("300x130")
+        rec = tk.BooleanVar(value=recalib_var.get())
+        ttk.Checkbutton(dlg, text="Use recalibrated state", variable=rec)\
+            .grid(row=0, column=0, sticky="w", padx=10, pady=10)
+        ttk.Label(dlg, text="Pressure compensation:")\
+            .grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        pcs_sel = tk.StringVar(value=pcs_var.get())
+        ttk.Combobox(dlg, textvariable=pcs_sel, state="readonly",
+                     values=("No compensation", "Per-frame", "Global"))\
+            .grid(row=1, column=1, sticky="w", padx=10, pady=5)
+        ttk.Button(dlg, text="Save",
+                   command=lambda: (recalib_var.set(rec.get()),
+                                    pcs_var.set(pcs_sel.get()), dlg.destroy()))\
+            .grid(row=2, column=0, columnspan=2, pady=10)
 
-    def update_status(status_message):
-        status_var.set(status_message)
-        root.update_idletasks()
+    ttk.Button(frame, text="Advanced settings", bootstyle="primary",
+               command=_advanced).grid(row=11, column=0, columnspan=2, pady=15)
 
-    process_data.update_status = update_status
+    ttk.Label(frame, text='Output saved as "*_raw.csv" in selected folder',
+              font=("Helvetica", 10)).grid(row=12, column=0, columnspan=2, pady=(0, 10))
+
+    # process button
+    process_btn = ttk.Button(frame, text="Select .d file/folder",
+                             bootstyle="primary", padding=(10, 5))
+    process_btn.grid(row=13, column=0, columnspan=2, pady=10)
+
+    # progress & status
+    pg_frame = ttk.Frame(frame, bootstyle="dark")
+    pg_frame.grid(row=14, column=0, columnspan=2, sticky="we", pady=10)
+    ttk.Progressbar(pg_frame, variable=progress_var, maximum=100, length=320,
+                    bootstyle="info").pack(fill="both", expand=True, padx=2, pady=2)
+    ttk.Label(frame, textvariable=status_var, font=("Helvetica", 12))\
+        .grid(row=15, column=0, columnspan=2, sticky="w")
+
+    for w in frame.winfo_children():
+        w.grid_configure(padx=10, pady=5)
+
+    process_data.update_status = lambda m: (status_var.set(m), root.update_idletasks())
+
+    # ── callbacks ──────────────────────────────────────────────────────────
+    def _run_single():
+        # validate inputs
+        try:
+            mz1, mz2 = float(mzmin_var.get()), float(mzmax_var.get())
+        except ValueError:
+            messagebox.showerror("Error", "Enter numeric m/z values."); return
+        target = filedialog.askdirectory(title="Select .d file or parent folder")
+        if not target: return
+        if ccs_chk_var.get() and (not charge_var.get() or not mzval_var.get()):
+            messagebox.showerror("Error", "Charge and m/z required for CCS."); return
+
+        process_btn.config(text="Processing…", state="disabled")
+        progress_var.set(0); status_var.set("Starting extraction…"); root.update_idletasks()
+
+        threading.Thread(
+            target=process_data,
+            args=(target, mz1, mz2,
+                  progress_var, status_var, process_btn, root,
+                  label_src_var.get(), sort_var.get(),
+                  recalib_var.get(), pcs_var.get(),
+                  bin_chk_var.get(), int(nbins_var.get() or 0),
+                  ccs_chk_var.get(), charge_var.get() or None, mzval_var.get() or None,
+                  polarity_var.get()),
+            daemon=True
+        ).start()
+
+    def _run_batch():
+        csv_path = filedialog.askopenfilename(title="Select batch CSV",
+                                              filetypes=[("CSV files", "*.csv")])
+        if not csv_path: return
+        try:
+            batch_df = pd.read_csv(csv_path)
+        except Exception as exc:
+            messagebox.showerror("Error", f"CSV read error:\n{exc}"); return
+        batch_btn.config(text="Batch running…", state="disabled")
+        threading.Thread(target=process_batch_data,
+                         args=(batch_df, progress_var, status_var, batch_btn, root),
+                         daemon=True).start()
+
+    process_btn.config(command=_run_single)
+    batch_btn.config(command=_run_batch)
 
     root.mainloop()
+
 
 if __name__ == "__main__":
     create_ui()

@@ -1,271 +1,227 @@
-import pandas as pd
+# processing.py
+
+from __future__ import annotations
+
 import os
 import re
 import numpy as np
+import pandas as pd
 from tkinter import messagebox
-from data_processing import extract_column_name, process_folder
+
 from timsdata import oneOverK0ToCCSforMz
+from data_processing import process_folder
 
-def bin_mobility_axis(df, num_bins):
-    bins = np.linspace(df["Mobility"].min(), df["Mobility"].max(), num_bins+1)
-    bin_midpoints = (bins[:-1] + bins[1:]) / 2
-    df["mobility_bin"] = pd.cut(df["Mobility"], bins=bins, labels=bin_midpoints, include_lowest=True)
-    intensity_cols = [col for col in df.columns if col not in ["Mobility", "mobility_bin"]]
-    aggregated = df.groupby("mobility_bin")[intensity_cols].sum().reset_index()
-    aggregated.rename(columns={"mobility_bin": "Mobility"}, inplace=True)
-    aggregated["Mobility"] = aggregated["Mobility"].astype(float)
-    return aggregated
+# ───────────────────────────────────────────────────────────────
+# Helper regex & utilities
+# ───────────────────────────────────────────────────────────────
+_VOLT_RE = re.compile(r"[_\-](\d+)[vV](?:_|$)")
 
-def process_data(input_folder, mzmin, mzmax, progress_var, status_var, process_button, root,
-                 extraction_method, sort_columns, use_recalibrated_state, pressure_compensation_strategy,
-                 do_binning, num_bins, ccs_conversion, charge, mz_value,
-                 sum_mode=False, mobmin=None, mobmax=None, batch_mode=False, output_dir=None):
-    # Determine where to save output files.
-    save_folder = output_dir if output_dir and os.path.isdir(output_dir) else input_folder
+def _voltage_from_name(path: str) -> str | None:
+    m = _VOLT_RE.search(os.path.basename(path))
+    return m.group(1) if m else None
 
-    if sum_mode:
-        rows = []
-        # Determine if input_folder is a .d folder or a container of subfolders.
-        if os.path.basename(input_folder).endswith(".d"):
-            folder_list = [input_folder]
-        else:
-            folder_list = [os.path.join(input_folder, f) for f in os.listdir(input_folder)
-                           if os.path.isdir(os.path.join(input_folder, f))]
-        total_folders = len(folder_list)
-        for idx, folder_path in enumerate(folder_list):
-            full_folder_path = os.path.abspath(folder_path)
-            status_message = f"Processing folder: {os.path.basename(folder_path)}"
-            process_data.update_status(status_message)
-            result_df = process_folder(full_folder_path, mzmin, mzmax, use_recalibrated_state,
-                                       pressure_compensation_strategy, sum_mode=True, mobmin=mobmin, mobmax=mobmax)
-            if result_df is not None:
-                from file_utils import extract_voltage_from_method_file
-                try:
-                    voltage = extract_voltage_from_method_file(full_folder_path)
-                except Exception as e:
-                    voltage = "unknown"
-                voltage_val = voltage[0] if isinstance(voltage, list) else voltage
-                result_df.insert(0, "Voltage", voltage_val)
-                rows.append(result_df)
-            else:
-                print(f"Folder {folder_path} returned no data.")
-            progress_var.set((idx + 1) / total_folders * 100)
-            root.update_idletasks()
-        if not rows:
-            messagebox.showerror("Error", "No data to process.")
-            status_var.set("Error: No data to process.")
-            root.update_idletasks()
-            return
-        master_df = pd.concat(rows, ignore_index=True)
-        master_df.sort_values("Voltage", inplace=True)
-        # Drop the "Voltage" column for output.
-        data_values = master_df.iloc[0, 1:]
-        seg_headers = list(master_df.columns[1:])
-        mz_range_str = f"{mzmin:.2f}-{mzmax:.2f}"
-        mob_range_str = f"{mobmin:.2f}-{mobmax:.2f}"
-        raw_name = os.path.basename(input_folder)
-        nseg = len(seg_headers)
-        row1 = ['#mz range'] + [mz_range_str] * nseg
-        row2 = ['#mobility range'] + [mob_range_str] * nseg
-        row3 = ['#Raw file name'] + [raw_name] * nseg
-        row4 = ["Voltage"] + seg_headers
-        row5 = ["Summed_intensity"] + list(data_values)
-        header_df = pd.DataFrame([row1, row2, row3, row4, row5], columns=range(1+nseg))
-        output_file_name = f"{os.path.basename(input_folder)}_mz{mz_range_str}_mob{mob_range_str}_summed_intensity.csv"
-        output_file_path = os.path.join(save_folder, output_file_name)
-        header_df.to_csv(output_file_path, index=False, header=False)
-        print(f"Data saved to {output_file_path}")
-        status_var.set("Processing complete")
-        root.update_idletasks()
-        if not batch_mode:
-            process_button.config(text="Select folder containing .d files", state="normal")
+
+def _numeric_key(text: str) -> float:
+    m = re.match(r"^-?\d+(?:\.\d+)?", text)
+    return float(m.group(0)) if m else float("inf")
+
+
+def _bin_mobility(df: pd.DataFrame, nbins: int) -> pd.DataFrame:
+    """Sum‑bin the mobility axis into *nbins* evenly spaced bins."""
+    if nbins < 1:
+        return df.copy()
+
+    edges = np.linspace(df["Mobility"].min(), df["Mobility"].max(), nbins + 1)
+    mids = (edges[:-1] + edges[1:]) / 2
+
+    df = df.copy()
+    df["_bin"] = pd.cut(
+        df["Mobility"], bins=edges, labels=mids, include_lowest=True, ordered=True
+    )
+
+    icols = [c for c in df.columns if c not in ("Mobility", "_bin")]
+    out = (
+        df.groupby("_bin", observed=False)[icols]
+        .sum()
+        .reset_index()
+        .rename(columns={"_bin": "Mobility"})
+    )
+    out["Mobility"] = out["Mobility"].astype(float)
+    return out
+
+
+# ───────────────────────────────────────────────────────────────
+#  Extraction for a single parent‑folder / .d file
+# ───────────────────────────────────────────────────────────────
+
+def process_data(
+    input_folder: str,
+    mzmin: float,
+    mzmax: float,
+    progress_var,
+    status_var,
+    btn,
+    root,
+    label_source: str,  # transfer | delta6 | filename
+    sort_cols: bool,
+    use_recal: bool,
+    pcs: str,
+    do_bin: bool,
+    nbins: int,
+    do_ccs: bool,
+    charge: str | None,
+    mzval: str | None,
+    polarity: str = "positive",  # positive | negative | both
+) -> None:
+    """Core routine called by UI & batch job runner."""
+
+    master = pd.DataFrame()
+
+    # Is *input_folder* already a .d file? If so, treat as single‑file list.
+    if input_folder.lower().endswith(".d"):
+        folder_list = [""]  # empty string -> operate directly on 'input_folder'
     else:
-        master_df = pd.DataFrame()
-        folder_names = {}
-        column_numbers = {}
-        folder_list = [os.path.join(input_folder, f) for f in os.listdir(input_folder)
-                       if os.path.isdir(os.path.join(input_folder, f))]
-        total_folders = len(folder_list)
-        for idx, folder_path in enumerate(folder_list):
-            full_folder_path = os.path.abspath(folder_path)
-            column_name = extract_column_name(full_folder_path, extraction_method)
-            if column_name is None:
-                column_name = "unknown"
-            column_name = str(column_name)
-            status_message = f"Processing folder: {os.path.basename(folder_path)}"
-            process_data.update_status(status_message)
-            result_df = process_folder(full_folder_path, mzmin, mzmax, use_recalibrated_state,
-                                       pressure_compensation_strategy)
-            if result_df is not None:
-                if len(result_df.columns) > 2:
-                    if master_df.empty:
-                        master_df = result_df.copy()
-                    else:
-                        master_df = pd.merge(master_df, result_df, on='Mobility', how='outer')
-                elif 'intensity' in result_df.columns:
-                    result_df.rename(columns={'intensity': column_name}, inplace=True)
-                    if master_df.empty:
-                        master_df = result_df[['Mobility', column_name]].copy()
-                    else:
-                        master_df = pd.merge(master_df, result_df[['Mobility', column_name]], on='Mobility', how='outer')
-                    folder_names[column_name] = os.path.basename(folder_path)
-                    column_numbers[column_name] = column_name
-                else:
-                    if master_df.empty:
-                        master_df = result_df.copy()
-                    else:
-                        master_df = pd.merge(master_df, result_df, on='Mobility', how='outer')
-            else:
-                print(f"Columns 'Mobility' and '{column_name}' not found in result_df.")
-            progress_var.set((idx + 1) / total_folders * 100)
-            root.update_idletasks()
-        if master_df.empty:
-            messagebox.showerror("Error", "No data to process.")
-            status_var.set("Error: No data to process.")
-            root.update_idletasks()
-            return
-        master_df.fillna(0, inplace=True)
-        if sort_columns:
-            if 'Mobility' in master_df.columns:
-                master_df = master_df.sort_values('Mobility')
-            else:
-                column_order = ['ko'] + sorted(
-                    [col for col in master_df.columns if col != 'ko'],
-                    key=lambda x: float(re.search(r'^(\d+(\.\d+)?)', x).group(1))
-                    if re.search(r'^(\d+(\.\d+)?)', x) else float('inf')
-                )
-                master_df = master_df[column_order]
-        if 'Mobility' not in master_df.columns:
-            master_df.rename(columns={'ko': 'Mobility'}, inplace=True)
-        if ccs_conversion:
-            try:
-                master_df['Mobility'] = master_df['Mobility'].apply(lambda x: oneOverK0ToCCSforMz(x, int(charge), float(mz_value)))
-            except Exception as e:
-                messagebox.showerror("Error", f"CCS conversion failed: {e}")
-                return
-        if do_binning:
-            master_df = bin_mobility_axis(master_df, num_bins)
-        mz_range_str = f"{int(mzmin)}-{int(mzmax)}"
-        if len(master_df.columns) > 1:
-            raw_name = os.path.basename(input_folder)
-            header1 = ['#mz range'] + [mz_range_str] * (len(master_df.columns) - 1)
-            header2 = ['#Raw file name'] + [raw_name] * (len(master_df.columns) - 1)
-        else:
-            header1 = ['#mz range']
-            header2 = ['#Raw file name']
-        header3 = list(master_df.columns)
-        header_df = pd.DataFrame([header1, header2, header3], columns=master_df.columns)
-        output_file_name = f"{os.path.basename(input_folder)}_mz{mz_range_str}_raw.csv"
-        output_file_path = os.path.join(save_folder, output_file_name)
-        final_df = pd.concat([header_df, master_df], ignore_index=True)
-        final_df.to_csv(output_file_path, index=False, header=False)
-        print(f"Data saved to {output_file_path}")
-        status_var.set("Processing complete")
+        subdirs = [d for d in os.listdir(input_folder) if os.path.isdir(os.path.join(input_folder, d))]
+        folder_list = subdirs if subdirs else [""]
+
+    total = len(folder_list)
+
+    for i, sub in enumerate(folder_list, 1):
+        folder = input_folder if sub == "" else os.path.join(input_folder, sub)
+        status_var.set(f"Processing {os.path.basename(folder)}")
         root.update_idletasks()
-        if not batch_mode:
-            process_button.config(text="Select folder containing .d files", state="normal")
 
-def process_batch_data(batch_data, progress_var, status_var, batch_button, root, output_dir=None):
-    import os
-    import pandas as pd
-    total_files = 0
-    # Compute total number of files to process.
-    for idx, row in batch_data.iterrows():
-        parent_folder = row['Parent Folder']
-        if ('min_mobility' in row and 'max_mobility' in row and 
-            pd.notna(row['min_mobility']) and pd.notna(row['max_mobility']) and 
-            row['min_mobility'] != "" and row['max_mobility'] != ""):
-            if os.path.basename(parent_folder).endswith(".d"):
-                total_files += 1
-            else:
-                subfolders = [os.path.join(parent_folder, f) for f in os.listdir(parent_folder)
-                              if os.path.isdir(os.path.join(parent_folder, f)) and f.endswith(".d")]
-                total_files += len(subfolders)
-        else:
-            subfolders = [os.path.join(parent_folder, f) for f in os.listdir(parent_folder)
-                          if os.path.isdir(os.path.join(parent_folder, f))]
-            total_files += len(subfolders)
-    if total_files == 0:
-        total_files = 1
+        part = process_folder(
+            folder,
+            mzmin,
+            mzmax,
+            extraction_method="filename" if label_source == "filename" else "method",
+            voltage_param_key=label_source if label_source != "filename" else "transfer",
+            voltage_polarity=polarity,
+            use_recalibrated_state=use_recal,
+            pressure_compensation_strategy=pcs,
+        )
 
-    processed_files = 0
-    total_rows = len(batch_data)
-    for idx, row in batch_data.iterrows():
-        try:
-            parent_folder = row['Parent Folder']
-            mzmin = float(row['mzmin'])
-            mzmax = float(row['mzmax'])
-            extraction_method = row['Extraction Method']
-            sort_columns = bool(row['Sort Columns'])
-            use_recalibrated_state = bool(row.get('Use Recalibrated State', True))
-            pressure_compensation_strategy = row.get('Pressure Compensation Strategy', 'AnalysisGlobalPressureCompensation')
-            
-            ccs_conversion = bool(str(row.get('Convert to CCS', "FALSE")).upper() == "TRUE")
-            charge = int(row['Charge']) if ('Charge' in row and pd.notna(row['Charge']) and row['Charge'] != "") else None
-            mz_value = float(row['mz']) if ('mz' in row and pd.notna(row['mz']) and row['mz'] != "") else None
-
-            if ('min_mobility' in row and 'max_mobility' in row and 
-                pd.notna(row['min_mobility']) and pd.notna(row['max_mobility']) and 
-                row['min_mobility'] != "" and row['max_mobility'] != ""):
-                sum_mode = True
-                mobmin = float(row['min_mobility'])
-                mobmax = float(row['max_mobility'])
-                if os.path.basename(parent_folder).endswith(".d"):
-                    subfolders = [parent_folder]
-                else:
-                    subfolders = [os.path.join(parent_folder, f) for f in os.listdir(parent_folder)
-                                  if os.path.isdir(os.path.join(parent_folder, f)) and f.endswith(".d")]
-                    if not subfolders:
-                        print(f"Warning: No .d folders found in {parent_folder}. Skipping this batch row.")
-                        continue
-                data_rows = []
-                for subfolder in subfolders:
-                    result_df = process_data(
-                        subfolder, mzmin, mzmax, progress_var, status_var, batch_button, root,
-                        extraction_method, sort_columns, use_recalibrated_state, pressure_compensation_strategy,
-                        False, 0, False, None, None, sum_mode, mobmin, mobmax, batch_mode=True, output_dir=output_dir
-                    )
-                    if result_df is not None:
-                        summed_values = result_df.iloc[0, 1:]
-                        raw_file = os.path.basename(subfolder)
-                        data_row = [raw_file] + list(summed_values)
-                        data_rows.append(data_row)
-                    processed_files += 1
-                    progress_var.set((processed_files / total_files) * 100)
-                    root.update_idletasks()
-                if data_rows:
-                    header_segments = list(result_df.columns[1:])
-                    header = ["Raw File"] + header_segments
-                    final_df = pd.DataFrame(data_rows, columns=header)
-                    mz_range_str = f"{mzmin:.2f}-{mzmax:.2f}"
-                    mob_range_str = f"{mobmin:.2f}-{mobmax:.2f}"
-                    output_file_name = f"{os.path.basename(parent_folder)}_mz{mz_range_str}_mob{mob_range_str}_summed_intensity.csv"
-                    output_file_path = os.path.join(parent_folder, output_file_name) if not output_dir else os.path.join(output_dir, output_file_name)
-                    final_df.to_csv(output_file_path, index=False)
-                    print(f"Data saved to {output_file_path}")
-                else:
-                    print(f"")
-            else:
-                sum_mode = False
-                do_binning = False
-                num_bins = 0
-                if 'bin_number' in row and pd.notna(row['bin_number']) and row['bin_number'] != "":
-                    do_binning = True
-                    num_bins = int(row['bin_number'])
-                subfolders = [os.path.join(parent_folder, f) for f in os.listdir(parent_folder)
-                              if os.path.isdir(os.path.join(parent_folder, f))]
-                for subfolder in subfolders:
-                    process_data(
-                        subfolder, mzmin, mzmax, progress_var, status_var, batch_button, root,
-                        extraction_method, sort_columns, use_recalibrated_state, pressure_compensation_strategy,
-                        do_binning, num_bins, ccs_conversion, charge, mz_value, sum_mode, None, None, batch_mode=True, output_dir=output_dir
-                    )
-                    processed_files += 1
-                    progress_var.set((processed_files / total_files) * 100)
-                    root.update_idletasks()
-        except Exception as e:
-            status_var.set(f"Error processing folder {parent_folder}: {e}")
+        if part is None or part.empty:
+            progress_var.set(i / total * 100)
             root.update_idletasks()
-    status_var.set("Batch processing complete")
-    batch_button.config(text="Batch Extraction", state="normal")
+            continue
+
+        # When using filename labelling, process_folder already renames the first
+        # intensity column.  We *might* still have multiple IntensityX columns if
+        # the acquisition used segments – rename them all consistently.
+        if label_source == "filename":
+            volt = _voltage_from_name(folder) or f"file{i}"
+            int_cols = [c for c in part.columns if c != "Mobility"]
+            rename_map = {c: volt if c.startswith("Intensity") else c for c in int_cols}
+            part.rename(columns=rename_map, inplace=True)
+
+        # Handle duplicate column names when merging multiple files
+        if not master.empty:
+            dupe = (set(master.columns) & set(part.columns)) - {"Mobility"}
+            if dupe:
+                part = part.rename(columns={c: f"{c}_{i}" for c in dupe})
+
+        master = part if master.empty else pd.merge(master, part, on="Mobility", how="outer")
+
+        progress_var.set(i / total * 100)
+        root.update_idletasks()
+
+    # ────────────────────────────────────────────────────────────
+    # Post‑processing & export
+    # ────────────────────────────────────────────────────────────
+    if master.empty:
+        messagebox.showerror("Error", "No data extracted.")
+        btn.config(text="Select .d file/folder", state="normal")
+        return
+
+    master.fillna(0, inplace=True)
+
+    if sort_cols and "Mobility" in master.columns:
+        master.sort_values("Mobility", inplace=True)
+        ordered = sorted([c for c in master.columns if c != "Mobility"], key=_numeric_key)
+        master = master[["Mobility"] + ordered]
+
+    if do_ccs:
+        try:
+            master["Mobility"] = master["Mobility"].apply(
+                lambda x: oneOverK0ToCCSforMz(x, int(charge), float(mzval))
+            )
+        except Exception as exc:
+            messagebox.showerror("Error", f"CCS conversion failed: {exc}")
+            btn.config(text="Select .d file/folder", state="normal")
+            return
+
+    if do_bin:
+        master = _bin_mobility(master, nbins)
+
+    base = os.path.basename(input_folder.rstrip("/\\"))
+    mz_tag = f"{int(mzmin)}-{int(mzmax)}"
+
+    head1 = ["#mz range"] + [mz_tag] * (len(master.columns) - 1)
+    head2 = ["#Raw file name"] + [base] * (len(master.columns) - 1)
+    head3 = list(master.columns)
+
+    out = pd.concat(
+        [pd.DataFrame([head1, head2, head3], columns=master.columns), master],
+        ignore_index=True,
+    )
+
+    fpath = os.path.join(input_folder, f"{base}_mz{mz_tag}_raw.csv")
+    out.to_csv(fpath, index=False, header=False)
+
+    status_var.set("Processing complete")
+    btn.config(text="Select .d file/folder", state="normal")
     root.update_idletasks()
+
+
+# ───────────────────────────────────────────────────────────────
+#  Batch CSV runner
+# ───────────────────────────────────────────────────────────────
+
+def process_batch_data(df: pd.DataFrame, progress_var, status_var, button, root):
+    total = len(df)
+
+    for idx, row in df.iterrows():
+        try:
+            is_filename_mode = str(row.get("Label Source", "transfer")).lower() == "filename"
+            target = str(row["Parent Folder"]).strip()
+
+            # Basic validation
+            if not is_filename_mode and not target.lower().endswith(".d"):
+                messagebox.showerror(
+                    "Error",
+                    f"Row {idx+1}: Expected a single .d file for method‑based labelling, got: {target}",
+                )
+                continue
+
+            process_data(
+                input_folder=target,
+                mzmin=float(row["mzmin"]),
+                mzmax=float(row["mzmax"]),
+                progress_var=progress_var,
+                status_var=status_var,
+                btn=button,
+                root=root,
+                label_source=row.get("Label Source", "transfer"),
+                sort_cols=bool(row.get("Sort Columns", True)),
+                use_recal=bool(row.get("Use Recalibrated State", True)),
+                pcs=row.get(
+                    "Pressure Compensation Strategy", "AnalysisGlobalPressureCompensation"
+                ),
+                do_bin=bool(row.get("Bin Mobility", False)),
+                nbins=int(row.get("Num Bins", 200) if row.get("Bin Mobility", False) else 0),
+                do_ccs=bool(row.get("Convert CCS", False)),
+                charge=row.get("Charge") if row.get("Convert CCS", False) else None,
+                mzval=row.get("mz for CCS") if row.get("Convert CCS", False) else None,
+                polarity=row.get("Voltage Polarity", "positive"),
+            )
+
+        except Exception as exc:
+            messagebox.showerror("Error", f"Row {idx+1} failed: {exc}")
+
+        progress_var.set((idx + 1) / total * 100)
+        root.update_idletasks()
+
+    status_var.set("Batch processing complete")
+    button.config(text="Batch Extraction", state="normal")
