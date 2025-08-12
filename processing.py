@@ -27,7 +27,7 @@ def _numeric_key(text: str) -> float:
 
 
 def _bin_mobility(df: pd.DataFrame, nbins: int) -> pd.DataFrame:
-    """Sum‑bin the mobility axis into *nbins* evenly spaced bins."""
+    """Sum-bin the mobility axis into *nbins* evenly spaced bins."""
     if nbins < 1:
         return df.copy()
 
@@ -51,7 +51,7 @@ def _bin_mobility(df: pd.DataFrame, nbins: int) -> pd.DataFrame:
 
 
 # ───────────────────────────────────────────────────────────────
-#  Extraction for a single parent‑folder / .d file
+#  Extraction for a single parent-folder / .d file
 # ───────────────────────────────────────────────────────────────
 
 def process_data(
@@ -77,7 +77,7 @@ def process_data(
 
     master = pd.DataFrame()
 
-    # Is *input_folder* already a .d file? If so, treat as single‑file list.
+    # Is *input_folder* already a .d file? If so, treat as single-file list.
     if input_folder.lower().endswith(".d"):
         folder_list = [""]  # empty string -> operate directly on 'input_folder'
     else:
@@ -128,7 +128,7 @@ def process_data(
         root.update_idletasks()
 
     # ────────────────────────────────────────────────────────────
-    # Post‑processing & export
+    # Post-processing & export
     # ────────────────────────────────────────────────────────────
     if master.empty:
         messagebox.showerror("Error", "No data extracted.")
@@ -167,7 +167,13 @@ def process_data(
         ignore_index=True,
     )
 
-    fpath = os.path.join(input_folder, f"{base}_mz{mz_tag}_raw.csv")
+    # ────────────────────────────────────────────────────────────
+    # SAVE LOCATION CHANGE:
+    # If the target is a *.d folder, save next to it (its parent directory),
+    # otherwise save in the selected folder (unchanged behavior).
+    # ────────────────────────────────────────────────────────────
+    save_dir = os.path.dirname(input_folder) if input_folder.lower().endswith(".d") else input_folder
+    fpath = os.path.join(save_dir, f"{base}_mz{mz_tag}_raw.csv")
     out.to_csv(fpath, index=False, header=False)
 
     status_var.set("Processing complete")
@@ -191,7 +197,7 @@ def process_batch_data(df: pd.DataFrame, progress_var, status_var, button, root)
             if not is_filename_mode and not target.lower().endswith(".d"):
                 messagebox.showerror(
                     "Error",
-                    f"Row {idx+1}: Expected a single .d file for method‑based labelling, got: {target}",
+                    f"Row {idx+1}: Expected a single .d file for method-based labelling, got: {target}",
                 )
                 continue
 
